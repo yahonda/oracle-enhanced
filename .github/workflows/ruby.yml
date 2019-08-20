@@ -16,4 +16,6 @@ jobs:
     - name: Build and test with Rake
       run: |
         gem install rubocop
+        gem install rubocop-performance
+        gem install rubocop-rails
         rubocop
