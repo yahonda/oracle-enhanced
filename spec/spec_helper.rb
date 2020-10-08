@@ -17,6 +17,8 @@ end
 
 require "rspec"
 
+Warning[:deprecated] = true if RUBY_VERSION >= "2.7.0"
+
 if !defined?(RUBY_ENGINE) || RUBY_ENGINE == "ruby" || RUBY_ENGINE == "truffleruby"
   puts "==> Running specs with ruby version #{RUBY_VERSION}"
   require "oci8"
