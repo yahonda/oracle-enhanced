@@ -88,7 +88,7 @@ module ActiveRecord
           default_tablespace_name = default_tablespace
 
           result = select_all(<<~SQL.squish, "SCHEMA", [bind_string("table_name", table_name)])
-            SELECT LOWER(i.table_name) AS table_name, LOWER(i.index_name) AS index_name, i.uniqueness,
+            SELECT /*+ OPT_PARAM('_optimizer_adaptive_plans','false') */ LOWER(i.table_name) AS table_name, LOWER(i.index_name) AS index_name, i.uniqueness,
               i.index_type, i.ityp_owner, i.ityp_name, i.parameters,
               LOWER(i.tablespace_name) AS tablespace_name,
               LOWER(c.column_name) AS column_name, e.column_expression,
