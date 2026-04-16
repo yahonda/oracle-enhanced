@@ -11,7 +11,7 @@ include:
 
 - Oracle enhanced adapter version (or commit SHA if you're on a branch)
 - Oracle Database version
-- Ruby engine and version (MRI / JRuby)
+- Ruby engine and version (CRuby / JRuby)
 - A minimal reproduction — runnable code, expected vs. actual behavior
 
 ## Submitting pull requests
@@ -65,9 +65,31 @@ is the recommended way to work on the adapter.
   - TNS configuration in `ci/network/admin`
   - Test users are provisioned automatically via `ci/setup_accounts.sh`
 
+## Development with JRuby
+
+The devcontainer is CRuby-only. JRuby contributors need a manual setup:
+
+1. Install [JRuby](https://www.jruby.org/) (head or latest stable).
+2. Download the JDBC driver and place it under `lib/`:
+   ```sh
+   wget -q https://download.oracle.com/otn-pub/otn_software/jdbc/23261/ojdbc17.jar \
+     -O lib/ojdbc17.jar
+   ```
+3. Start Oracle Database Free and run `ci/setup_accounts.sh` to create
+   the test users (see the devcontainer section above for connection
+   details).
+4. Run the suite:
+   ```sh
+   bundle install
+   bundle exec rspec
+   ```
+
+The JRuby CI workflow (`.github/workflows/jruby_head.yml`) is the
+reference for the full setup steps.
+
 ## Running the test suite
 
-Inside the devcontainer:
+Inside the devcontainer (CRuby):
 
 ```sh
 bundle exec rspec                                   # full suite
