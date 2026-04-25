@@ -235,8 +235,11 @@ module ActiveRecord
           end
           schema_cache.clear_data_source_cache!(table_name.to_s)
           schema_cache.clear_data_source_cache!(new_name.to_s)
+          identity_pk = identity_pk?(table_name)
           execute "RENAME #{quote_table_name(table_name)} TO #{quote_table_name(new_name)}"
-          execute "RENAME #{default_sequence_name(table_name, nil)} TO #{default_sequence_name(new_name, nil)}" rescue nil
+          unless identity_pk
+            execute "RENAME #{default_sequence_name(table_name, nil)} TO #{default_sequence_name(new_name, nil)}" rescue nil
+          end
           @prefetch_primary_key_cache.delete(table_name.to_s)
 
           rename_table_indexes(table_name, new_name, **options)
@@ -248,9 +251,13 @@ module ActiveRecord
           custom_sequence_name = table_names.size == 1 ? options[:sequence_name] : nil
           table_names.each do |table_name|
             schema_cache.clear_data_source_cache!(table_name.to_s)
+            identity_pk = identity_pk?(table_name)
             execute "DROP TABLE #{quote_table_name(table_name)}#{' CASCADE CONSTRAINTS' if options[:force] == :cascade}"
-            seq_name = custom_sequence_name || default_sequence_name(table_name, nil)
-            execute "DROP SEQUENCE #{quote_table_name(seq_name)}" rescue nil
+            if custom_sequence_name
+              execute "DROP SEQUENCE #{quote_table_name(custom_sequence_name)}" rescue nil
+            elsif !identity_pk
+              execute "DROP SEQUENCE #{quote_table_name(default_sequence_name(table_name, nil))}" rescue nil
+            end
           rescue ActiveRecord::StatementInvalid => e
             raise e unless options[:if_exists]
           ensure
@@ -641,6 +648,18 @@ module ActiveRecord
         end
 
         private
+          # True when +table_name+ exists and its primary key column is an Oracle
+          # identity column. Returns false when the table is not present (e.g.
+          # +drop_table if_exists:+ for a missing table) or when the database does
+          # not support identity columns.
+          def identity_pk?(table_name)
+            return false unless supports_identity_columns?
+            owner, desc_table_name = resolve_data_source_name(table_name)
+            identity_primary_key?(owner, desc_table_name)
+          rescue OracleEnhanced::ConnectionException
+            false
+          end
+
           def index_column_names(column_names) # :nodoc:
             column_names.is_a?(Array) ? column_names : Array(column_names)
           end
