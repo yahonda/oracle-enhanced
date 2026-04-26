@@ -24,6 +24,7 @@ jobs:
             jruby_opts: '--dev'
     env:
       JRUBY_OPTS: ${{ matrix.jruby_opts }}
+      SPEC_OPTS: "--seed 16036"
       ORACLE_HOME: /opt/oracle/instantclient_23_26
       LD_LIBRARY_PATH: /opt/oracle/instantclient_23_26
       NLS_LANG: AMERICAN_AMERICA.AL32UTF8
