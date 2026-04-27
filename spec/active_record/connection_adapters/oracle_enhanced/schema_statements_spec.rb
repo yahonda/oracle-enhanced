@@ -111,6 +111,34 @@ describe "OracleEnhancedAdapter schema definition" do
       expect(seq).to be_nil
     end
 
+    it "creates a sequence for an integer primary key" do
+      schema_define do
+        create_table :test_lookups, force: true, id: false do |t|
+          t.primary_key :code, :integer
+          t.string :name
+        end
+      end
+
+      seq = @conn.select_value(<<~SQL.squish, "SCHEMA")
+        SELECT 1 FROM user_sequences WHERE sequence_name = 'TEST_LOOKUPS_SEQ'
+      SQL
+      expect(seq).not_to be_nil
+    end
+
+    it "creates a sequence for a bigint primary key" do
+      schema_define do
+        create_table :test_lookups, force: true, id: false do |t|
+          t.primary_key :code, :bigint
+          t.string :name
+        end
+      end
+
+      seq = @conn.select_value(<<~SQL.squish, "SCHEMA")
+        SELECT 1 FROM user_sequences WHERE sequence_name = 'TEST_LOOKUPS_SEQ'
+      SQL
+      expect(seq).not_to be_nil
+    end
+
     it "inserts via the Rails insert path on a String primary key" do
       schema_define do
         create_table :test_lookups, force: true, id: false do |t|
