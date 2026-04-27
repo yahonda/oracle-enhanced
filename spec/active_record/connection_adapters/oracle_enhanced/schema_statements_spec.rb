@@ -1414,12 +1414,16 @@ end
       @conn.instance_variable_set :@would_execute_sql, @would_execute_sql = +""
       class << @conn
         def execute(sql, name = nil); @would_execute_sql << sql << ";\n"; end
+        def execute_batch(statements, name = nil, **kwargs)
+          statements.each { |s| execute(s, name) }
+        end
       end
     end
 
     after(:each) do
       class << @conn
         remove_method :execute
+        remove_method :execute_batch
       end
       @conn.instance_eval { remove_instance_variable :@would_execute_sql }
     end

@@ -201,78 +201,21 @@ module ActiveRecord
 
         def create_table(table_name, id: :primary_key, primary_key: nil, force: nil, **options)
           identity = options[:identity]
-          create_sequence = id != false
-          td = create_table_definition(
-            table_name, **options.extract!(:temporary, :options, :as, :comment, :tablespace, :organization)
-          )
-
-          if identity
-            unless supports_identity_columns?
-              raise ArgumentError,
-                "`identity: true` requires Oracle Database 12.1 or higher (current: #{database_version.join('.')}). Remove `identity: true` or upgrade the database."
-            end
-            unless id == :primary_key
-              raise ArgumentError,
-                "`identity: true` requires `id: :primary_key` (the default); got id: #{id.inspect}."
-            end
-            if primary_key.is_a?(Array)
-              raise ArgumentError,
-                "`identity: true` cannot be combined with a composite primary key."
-            end
-          end
-
-          if id && !td.as
-            pk = primary_key || Base.get_primary_key(table_name.to_s.singularize)
-
-            if pk.is_a?(Array)
-              td.primary_keys pk
-            else
-              td.primary_key pk, id, **options
-            end
-          end
-
-          # store that primary key was defined in create_table block
-          unless create_sequence
-            class << td
-              attr_accessor :create_sequence
-              # Only request a sequence when the primary key column is a
-              # numeric type that a +NUMBER+ sequence can populate. For
-              # example, +t.primary_key :code, :string+ inside +id: false+
-              # creates a VARCHAR2 PK; building a numeric sequence for it
-              # is meaningless and pollutes the schema with an unused
-              # +<table>_seq+.
-              def primary_key(name, type = :primary_key, **options)
-                if [:primary_key, :integer, :bigint, :decimal].include?(type)
-                  self.create_sequence = true
-                end
-                super(name, type, **options)
-              end
-            end
-          end
-
-          yield td if block_given?
-          create_sequence = create_sequence || td.create_sequence
+          validate_identity_options!(identity, id, primary_key)
 
           if force && data_source_exists?(table_name)
             drop_table(table_name, force: force, if_exists: true)
-          else
-            schema_cache.clear_data_source_cache!(table_name.to_s)
           end
 
-          execute schema_creation.accept td
-
-          create_pk_sequence(table_name, options) if create_sequence && !identity
-
-          if supports_comments? && !supports_comments_in_create?
-            if table_comment = td.comment.presence
-              change_table_comment(table_name, table_comment)
-            end
-            td.columns.each do |column|
-              change_column_comment(table_name, column.name, column.comment) if column.comment.present?
-            end
+          captured_td = nil
+          super(table_name, id: id, primary_key: primary_key, force: nil, **options) do |td|
+            captured_td = td
+            yield td if block_given?
           end
-          td.indexes.each { |c, o| add_index table_name, c, **o }
 
+          captured_td.indexes.each { |c, o| add_index table_name, c, **o }
+
+          create_pk_sequence(table_name, options) if should_create_sequence?(captured_td, id, identity)
           rebuild_primary_key_index_to_default_tablespace(table_name, options)
         end
 
@@ -670,6 +613,31 @@ module ActiveRecord
         end
 
         private
+          def validate_identity_options!(identity, id, primary_key)
+            return unless identity
+            unless supports_identity_columns?
+              raise ArgumentError,
+                "`identity: true` requires Oracle Database 12.1 or higher (current: #{database_version.join('.')}). Remove `identity: true` or upgrade the database."
+            end
+            unless id == :primary_key
+              raise ArgumentError,
+                "`identity: true` requires `id: :primary_key` (the default); got id: #{id.inspect}."
+            end
+            if primary_key.is_a?(Array)
+              raise ArgumentError,
+                "`identity: true` cannot be combined with a composite primary key."
+            end
+          end
+
+          def should_create_sequence?(td, id, identity)
+            return false if identity
+            return true if id != false
+            td.columns.any? do |column|
+              column.options[:primary_key] &&
+                [:primary_key, :integer, :bigint, :decimal].include?(column.type)
+            end
+          end
+
           def change_table_comment_sql(table_name, comment_or_changes)
             comment = extract_new_comment_value(comment_or_changes)
             if comment.nil?
