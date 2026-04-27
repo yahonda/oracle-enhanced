@@ -399,7 +399,7 @@ module ActiveRecord
           add_column_sql = schema_creation.accept at
           add_column_sql << tablespace_for((type_to_sql(type).downcase.to_sym), nil, table_name, column_name)
           execute add_column_sql
-          create_pk_sequence(table_name, options) if type && type.to_sym == :primary_key
+          create_pk_sequence(table_name, options) if type.to_sym == :primary_key
           change_column_comment(table_name, column_name, options[:comment]) if options.key?(:comment)
         ensure
           clear_table_columns_cache(table_name)
