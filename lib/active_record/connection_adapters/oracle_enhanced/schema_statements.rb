@@ -638,10 +638,13 @@ module ActiveRecord
 
           def should_create_sequence?(td, id, identity)
             return false if identity
-            return true if id != false
-            td.columns.any? do |column|
-              column.options[:primary_key] &&
-                [:primary_key, :integer, :bigint, :decimal].include?(column.type)
+            numeric_pk_types = [:primary_key, :integer, :bigint, :decimal]
+            if id
+              numeric_pk_types.include?(id)
+            else
+              td.columns.any? do |column|
+                column.options[:primary_key] && numeric_pk_types.include?(column.type)
+              end
             end
           end
 
