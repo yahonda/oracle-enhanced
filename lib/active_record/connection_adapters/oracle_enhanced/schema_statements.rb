@@ -223,7 +223,7 @@ module ActiveRecord
             yield td if block_given?
           end
 
-          captured_td.indexes.each { |c, o| add_index table_name, c, **o }
+          add_inline_unique_constraints(table_name, captured_td)
 
           create_pk_sequence(table_name, options) if should_create_sequence?(captured_td, id, identity)
           rebuild_primary_key_index_to_default_tablespace(table_name, options)
@@ -653,6 +653,14 @@ module ActiveRecord
           def add_unique_constraint_sql(table_name, columns, index_name)
             quoted_cols = Array(columns).map { |column| quote_column_name_or_expression(column) }.join(", ")
             "ALTER TABLE #{quote_table_name(table_name)} ADD CONSTRAINT #{quote_column_name(index_name)} UNIQUE (#{quoted_cols}) USING INDEX #{quote_column_name(index_name)}"
+          end
+
+          def add_inline_unique_constraints(table_name, td)
+            td.indexes.each do |column_name, index_options|
+              next unless needs_unique_constraint?(index_options[:unique], column_name)
+              inline_index_name = index_options[:name]&.to_s || index_name(table_name, column: index_column_names(column_name))
+              execute add_unique_constraint_sql(table_name, column_name, inline_index_name)
+            end
           end
 
           def validate_identity_options!(identity, id, primary_key)
