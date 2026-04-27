@@ -1591,6 +1591,74 @@ end
       # and the assertion is unrelated to what the test is checking.
       expect(@would_execute_sql).to match(/ALTER +TABLE .* ADD CONSTRAINT .* UNIQUE \(.*\) USING INDEX "THIS_INDEX";/)
     end
+
+    it "should emit CREATE UNIQUE INDEX and ADD CONSTRAINT for inline t.index unique: true" do
+      schema_define do
+        create_table :test_inline_index_posts, force: true do |t|
+          t.string :title
+          t.index :title, unique: true, name: :uniq_inline_title
+        end
+      end
+      expect(@would_execute_sql).to match(/CREATE UNIQUE INDEX "UNIQ_INLINE_TITLE" ON "TEST_INLINE_INDEX_POSTS" \("TITLE"\)/)
+      expect(@would_execute_sql).to match(/ALTER +TABLE "TEST_INLINE_INDEX_POSTS" ADD CONSTRAINT "UNIQ_INLINE_TITLE" UNIQUE \("TITLE"\) USING INDEX "UNIQ_INLINE_TITLE"/)
+    end
+
+    it "should emit CREATE UNIQUE INDEX without ADD CONSTRAINT for inline functional t.index unique: true" do
+      schema_define do
+        create_table :test_inline_index_posts, force: true do |t|
+          t.string :title
+          t.index "lower(title)", unique: true, name: :uniq_inline_lower_title
+        end
+      end
+      expect(@would_execute_sql).to match(/CREATE UNIQUE INDEX "UNIQ_INLINE_LOWER_TITLE" ON "TEST_INLINE_INDEX_POSTS" \(lower\(title\)\)/)
+      expect(@would_execute_sql).not_to include("ADD CONSTRAINT")
+    end
+
+    it "should emit CREATE INDEX without ADD CONSTRAINT for inline non-unique t.index" do
+      schema_define do
+        create_table :test_inline_index_posts, force: true do |t|
+          t.string :title
+          t.index :title, name: :idx_inline_title
+        end
+      end
+      expect(@would_execute_sql).to match(/CREATE INDEX "IDX_INLINE_TITLE" ON "TEST_INLINE_INDEX_POSTS" \("TITLE"\)/)
+      expect(@would_execute_sql).not_to include("ADD CONSTRAINT")
+    end
+
+    it "should emit TABLESPACE for inline t.index with :tablespace option" do
+      schema_define do
+        create_table :test_inline_index_posts, force: true do |t|
+          t.string :title
+          t.index :title, name: :idx_inline_title_ts, tablespace: "bogus"
+        end
+      end
+      expect(@would_execute_sql).to match(/CREATE INDEX "IDX_INLINE_TITLE_TS" ON "TEST_INLINE_INDEX_POSTS" \("TITLE"\) TABLESPACE bogus/)
+    end
+
+    it "produces the same SQL whether unique index is defined inline or via explicit add_index" do
+      schema_define do
+        create_table :test_explicit_idx_posts, force: true do |t|
+          t.string :title
+        end
+        add_index :test_explicit_idx_posts, :title, unique: true, name: :uniq_title
+      end
+      explicit_sql = @would_execute_sql.dup
+
+      @would_execute_sql.replace("")
+      schema_define do
+        drop_table :test_explicit_idx_posts, if_exists: true
+        create_table :test_explicit_idx_posts, force: true do |t|
+          t.string :title
+          t.index :title, unique: true, name: :uniq_title
+        end
+      end
+      inline_sql = @would_execute_sql
+
+      [/CREATE TABLE "TEST_EXPLICIT_IDX_POSTS"/, /CREATE UNIQUE INDEX "UNIQ_TITLE"/, /ALTER +TABLE "TEST_EXPLICIT_IDX_POSTS" ADD CONSTRAINT "UNIQ_TITLE" UNIQUE \("TITLE"\) USING INDEX "UNIQ_TITLE"/].each do |pattern|
+        expect(explicit_sql).to match(pattern)
+        expect(inline_sql).to match(pattern)
+      end
+    end
   end
 
   describe "load schema" do

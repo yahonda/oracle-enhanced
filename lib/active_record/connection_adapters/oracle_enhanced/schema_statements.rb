@@ -223,7 +223,7 @@ module ActiveRecord
             yield td if block_given?
           end
 
-          captured_td.indexes.each { |c, o| add_index table_name, c, **o }
+          add_inline_unique_constraints(table_name, captured_td)
 
           create_pk_sequence(table_name, options) if should_create_sequence?(captured_td, id, identity)
           rebuild_primary_key_index_to_default_tablespace(table_name, options)
@@ -260,38 +260,49 @@ module ActiveRecord
         end
 
         def add_index(table_name, column_name, **options) # :nodoc:
-          result = add_index_options(table_name, column_name, **options)
-          return if result.nil?
-          index_name, index_type, quoted_column_names, tablespace, index_options = result
-          execute "CREATE #{index_type} INDEX #{quote_column_name(index_name)} ON #{quote_table_name(table_name)} (#{quoted_column_names})#{tablespace} #{index_options}"
-          if index_type == "UNIQUE"
-            unless /\(.*\)/.match?(quoted_column_names)
-              execute "ALTER TABLE #{quote_table_name(table_name)} ADD CONSTRAINT #{quote_column_name(index_name)} #{index_type} (#{quoted_column_names}) USING INDEX #{quote_column_name(index_name)}"
-            end
+          create_index = build_create_index_definition(table_name, column_name, **options)
+          return unless create_index
+
+          execute schema_creation.accept(create_index)
+
+          index = create_index.index
+          if needs_unique_constraint?(index.unique, index.columns)
+            execute add_unique_constraint_sql(index.table, index.columns, index.name)
           end
         end
 
-        def add_index_options(table_name, column_name, name: nil, if_not_exists: false, internal: false, **options) # :nodoc:
-          column_names = Array(column_name)
-          index_name   = index_name(table_name, column: column_names)
+        def build_create_index_definition(table_name, column_name, **options) # :nodoc:
+          index, algorithm, if_not_exists = add_index_options(table_name, column_name, **options)
 
+          if table_exists?(table_name) && index_name_exists?(table_name, index.name)
+            return if if_not_exists
+            raise ArgumentError, "Index name '#{index.name}' on table '#{table_name}' already exists"
+          end
+
+          CreateIndexDefinition.new(index, algorithm, if_not_exists)
+        end
+
+        def add_index_options(table_name, column_name, name: nil, if_not_exists: false, internal: false, **options) # :nodoc:
           options.assert_valid_keys(:unique, :order, :where, :length, :tablespace, :options, :using, :comment)
 
-          index_type = options[:unique] ? "UNIQUE" : ""
-          index_name = name.to_s if name
-          tablespace = tablespace_for(:index, options[:tablespace])
-          # TODO: This option is used for NOLOGGING, needs better argument name
-          index_options = options[:options]
+          column_names = index_column_names(column_name)
+          index_name = name&.to_s || index_name(table_name, column: column_names)
 
           validate_index_length!(table_name, index_name, internal)
 
-          if table_exists?(table_name) && index_name_exists?(table_name, index_name)
-            return nil if if_not_exists
-            raise ArgumentError, "Index name '#{index_name}' on table '#{table_name}' already exists"
-          end
+          index = OracleEnhanced::IndexDefinition.new(
+            table_name,
+            index_name,
+            options[:unique] || false,
+            column_names,
+            {},
+            nil,
+            nil,
+            options[:options],
+            options[:tablespace] || default_tablespace_for(:index)
+          )
 
-          quoted_column_names = column_names.map { |e| quote_column_name_or_expression(e) }.join(", ")
-          [index_name, index_type, quoted_column_names, tablespace, index_options]
+          [index, nil, if_not_exists]
         end
 
         # Remove the given index from the table.
@@ -622,7 +633,36 @@ module ActiveRecord
           super + [:identity, :sequence_name, :sequence_start_value]
         end
 
+        def quoted_columns_for_index(column_names, options) # :nodoc:
+          quoted_columns = column_names.each_with_object({}) do |name, result|
+            result[name.to_sym] = quote_column_name_or_expression(name).dup
+          end
+          add_options_for_index_columns(quoted_columns, **options).values.join(", ")
+        end
+
         private
+          def index_column_names(column_names) # :nodoc:
+            column_names.is_a?(Array) ? column_names : Array(column_names)
+          end
+
+          def needs_unique_constraint?(unique, columns)
+            return false unless unique
+            Array(columns).none? { |column| column.to_s.include?("(") }
+          end
+
+          def add_unique_constraint_sql(table_name, columns, index_name)
+            quoted_cols = Array(columns).map { |column| quote_column_name_or_expression(column) }.join(", ")
+            "ALTER TABLE #{quote_table_name(table_name)} ADD CONSTRAINT #{quote_column_name(index_name)} UNIQUE (#{quoted_cols}) USING INDEX #{quote_column_name(index_name)}"
+          end
+
+          def add_inline_unique_constraints(table_name, td)
+            td.indexes.each do |column_name, index_options|
+              next unless needs_unique_constraint?(index_options[:unique], column_name)
+              inline_index_name = index_options[:name]&.to_s || index_name(table_name, column: index_column_names(column_name))
+              execute add_unique_constraint_sql(table_name, column_name, inline_index_name)
+            end
+          end
+
           def validate_identity_options!(identity, id, primary_key)
             return unless identity
             unless supports_identity_columns?

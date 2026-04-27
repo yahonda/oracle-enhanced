@@ -361,15 +361,6 @@ module ActiveRecord
         true
       end
 
-      # Oracle has no inline non-constraint index syntax (true through 23ai); this
-      # override only returns true to make Rails' base `create_table` skip its index
-      # branch, which is incompatible with oracle-enhanced's `add_index_options`
-      # return shape. Removed once https://github.com/rsim/oracle-enhanced/issues/2611
-      # lands.
-      def supports_indexes_in_create?
-        true
-      end
-
       def supports_multi_insert?
         database_version.to_s >= [11, 2].to_s
       end
