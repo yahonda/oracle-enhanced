@@ -667,6 +667,10 @@ module ActiveRecord
           OracleEnhanced::SchemaCreation.new self
         end
 
+        def valid_table_definition_options # :nodoc:
+          super + [:tablespace, :organization]
+        end
+
         def valid_primary_key_options # :nodoc:
           super + [:identity]
         end
