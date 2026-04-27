@@ -200,79 +200,32 @@ module ActiveRecord
         #   end
 
         def create_table(table_name, id: :primary_key, primary_key: nil, force: nil, **options)
+          # Mirror upstream guard: `super` is called with `force: nil` below, so the same check there is bypassed.
+          if force && options.key?(:if_not_exists)
+            raise ArgumentError, "Options `:force` and `:if_not_exists` cannot be used simultaneously."
+          end
+
           identity = options[:identity]
-          create_sequence = id != false
-          td = create_table_definition(
-            table_name, **options.extract!(:temporary, :options, :as, :comment, :tablespace, :organization)
-          )
-
-          if identity
-            unless supports_identity_columns?
-              raise ArgumentError,
-                "`identity: true` requires Oracle Database 12.1 or higher (current: #{database_version.join('.')}). Remove `identity: true` or upgrade the database."
-            end
-            unless id == :primary_key
-              raise ArgumentError,
-                "`identity: true` requires `id: :primary_key` (the default); got id: #{id.inspect}."
-            end
-            if primary_key.is_a?(Array)
-              raise ArgumentError,
-                "`identity: true` cannot be combined with a composite primary key."
-            end
-          end
-
-          if id && !td.as
-            pk = primary_key || Base.get_primary_key(table_name.to_s.singularize)
-
-            if pk.is_a?(Array)
-              td.primary_keys pk
-            else
-              td.primary_key pk, id, **options
-            end
-          end
-
-          # store that primary key was defined in create_table block
-          unless create_sequence
-            class << td
-              attr_accessor :create_sequence
-              # Only request a sequence when the primary key column is a
-              # numeric type that a +NUMBER+ sequence can populate. For
-              # example, +t.primary_key :code, :string+ inside +id: false+
-              # creates a VARCHAR2 PK; building a numeric sequence for it
-              # is meaningless and pollutes the schema with an unused
-              # +<table>_seq+.
-              def primary_key(name, type = :primary_key, **options)
-                if [:primary_key, :integer, :bigint, :decimal].include?(type)
-                  self.create_sequence = true
-                end
-                super(name, type, **options)
-              end
-            end
-          end
-
-          yield td if block_given?
-          create_sequence = create_sequence || td.create_sequence
+          validate_identity_options!(identity, id, primary_key)
 
           if force && data_source_exists?(table_name)
             drop_table(table_name, force: force, if_exists: true)
-          else
-            schema_cache.clear_data_source_cache!(table_name.to_s)
+          elsif options[:if_not_exists] && data_source_exists?(table_name)
+            # Oracle 21c and earlier do not support `CREATE TABLE IF NOT EXISTS` DDL;
+            # pre-check existence in Ruby so the emitted SQL stays identical across
+            # all supported Oracle releases.
+            return
           end
 
-          execute schema_creation.accept td
-
-          create_sequence_and_trigger(table_name, options) if create_sequence && !identity
-
-          if supports_comments? && !supports_comments_in_create?
-            if table_comment = td.comment.presence
-              change_table_comment(table_name, table_comment)
-            end
-            td.columns.each do |column|
-              change_column_comment(table_name, column.name, column.comment) if column.comment.present?
-            end
+          captured_td = nil
+          super(table_name, id: id, primary_key: primary_key, force: nil, **options) do |td|
+            captured_td = td
+            yield td if block_given?
           end
-          td.indexes.each { |c, o| add_index table_name, c, **o }
 
+          captured_td.indexes.each { |c, o| add_index table_name, c, **o }
+
+          create_pk_sequence(table_name, options) if should_create_sequence?(captured_td, id, identity)
           rebuild_primary_key_index_to_default_tablespace(table_name, options)
         end
 
@@ -449,7 +402,7 @@ module ActiveRecord
           add_column_sql = schema_creation.accept at
           add_column_sql << tablespace_for((type_to_sql(type).downcase.to_sym), nil, table_name, column_name)
           execute add_column_sql
-          create_sequence_and_trigger(table_name, options) if type && type.to_sym == :primary_key
+          create_pk_sequence(table_name, options) if type.to_sym == :primary_key
           change_column_comment(table_name, column_name, options[:comment]) if options.key?(:comment)
         ensure
           clear_table_columns_cache(table_name)
@@ -523,18 +476,12 @@ module ActiveRecord
 
         def change_table_comment(table_name, comment_or_changes)
           clear_cache!
-          comment = extract_new_comment_value(comment_or_changes)
-          if comment.nil?
-            execute "COMMENT ON TABLE #{quote_table_name(table_name)} IS ''"
-          else
-            execute "COMMENT ON TABLE #{quote_table_name(table_name)} IS #{quote(comment)}"
-          end
+          execute change_table_comment_sql(table_name, comment_or_changes)
         end
 
         def change_column_comment(table_name, column_name, comment_or_changes)
           clear_cache!
-          comment = extract_new_comment_value(comment_or_changes)
-          execute "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS '#{comment}'"
+          execute change_column_comment_sql(table_name, column_name, comment_or_changes)
         end
 
         def table_comment(table_name) # :nodoc:
@@ -667,11 +614,61 @@ module ActiveRecord
           OracleEnhanced::SchemaCreation.new self
         end
 
+        def valid_table_definition_options # :nodoc:
+          super + [:tablespace, :organization]
+        end
+
         def valid_primary_key_options # :nodoc:
-          super + [:identity]
+          super + [:identity, :sequence_name, :sequence_start_value]
         end
 
         private
+          def validate_identity_options!(identity, id, primary_key)
+            return unless identity
+            unless supports_identity_columns?
+              raise ArgumentError,
+                "`identity: true` requires Oracle Database 12.1 or higher (current: #{database_version.join('.')}). Remove `identity: true` or upgrade the database."
+            end
+            unless id == :primary_key
+              raise ArgumentError,
+                "`identity: true` requires `id: :primary_key` (the default); got id: #{id.inspect}."
+            end
+            if primary_key.is_a?(Array)
+              raise ArgumentError,
+                "`identity: true` cannot be combined with a composite primary key."
+            end
+          end
+
+          def should_create_sequence?(td, id, identity)
+            return false if identity
+            numeric_pk_types = [:primary_key, :integer, :bigint, :decimal]
+            if id
+              numeric_pk_types.include?(id)
+            else
+              td.columns.any? do |column|
+                column.options[:primary_key] && numeric_pk_types.include?(column.type)
+              end
+            end
+          end
+
+          def change_table_comment_sql(table_name, comment_or_changes)
+            comment = extract_new_comment_value(comment_or_changes)
+            if comment.nil?
+              "COMMENT ON TABLE #{quote_table_name(table_name)} IS ''"
+            else
+              "COMMENT ON TABLE #{quote_table_name(table_name)} IS #{quote(comment)}"
+            end
+          end
+
+          def change_column_comment_sql(table_name, column_name, comment_or_changes)
+            comment = extract_new_comment_value(comment_or_changes)
+            if comment.nil?
+              "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS ''"
+            else
+              "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS #{quote(comment)}"
+            end
+          end
+
           def insert_versions_sql(versions)
             sm_table = quote_table_name(ActiveRecord::Tasks::DatabaseTasks.migration_connection_pool.schema_migration.table_name)
 
@@ -779,9 +776,10 @@ module ActiveRecord
             column
           end
 
-          def create_sequence_and_trigger(table_name, options)
-            # TODO: Needs rename since no triggers created
-            # This method will be removed since sequence will not be created separately
+          # TODO: extend to also create a BEFORE INSERT trigger when issue
+          # https://github.com/rsim/oracle-enhanced/issues/2597 introduces
+          # `primary_key_trigger: true`.
+          def create_pk_sequence(table_name, options)
             seq_name = options[:sequence_name] || default_sequence_name(table_name, nil)
             seq_start_value = options[:sequence_start_value] || default_sequence_start_value
             execute "CREATE SEQUENCE #{quote_table_name(seq_name)} START WITH #{seq_start_value}"

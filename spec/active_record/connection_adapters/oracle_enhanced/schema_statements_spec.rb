@@ -111,6 +111,34 @@ describe "OracleEnhancedAdapter schema definition" do
       expect(seq).to be_nil
     end
 
+    it "creates a sequence for an integer primary key" do
+      schema_define do
+        create_table :test_lookups, force: true, id: false do |t|
+          t.primary_key :code, :integer
+          t.string :name
+        end
+      end
+
+      seq = @conn.select_value(<<~SQL.squish, "SCHEMA")
+        SELECT 1 FROM user_sequences WHERE sequence_name = 'TEST_LOOKUPS_SEQ'
+      SQL
+      expect(seq).not_to be_nil
+    end
+
+    it "creates a sequence for a bigint primary key" do
+      schema_define do
+        create_table :test_lookups, force: true, id: false do |t|
+          t.primary_key :code, :bigint
+          t.string :name
+        end
+      end
+
+      seq = @conn.select_value(<<~SQL.squish, "SCHEMA")
+        SELECT 1 FROM user_sequences WHERE sequence_name = 'TEST_LOOKUPS_SEQ'
+      SQL
+      expect(seq).not_to be_nil
+    end
+
     it "inserts via the Rails insert path on a String primary key" do
       schema_define do
         create_table :test_lookups, force: true, id: false do |t|
@@ -613,6 +641,51 @@ end
       expect do
         @conn.add_index :test_posts, :title
       end.to raise_error(ArgumentError, /already exists/)
+    end
+  end
+
+  describe "create_table with if_not_exists" do
+    before(:each) do
+      @conn = ActiveRecord::Base.lease_connection
+    end
+
+    after(:each) do
+      schema_define { drop_table :test_posts, if_exists: true }
+    end
+
+    it "creates the table when it does not yet exist" do
+      schema_define do
+        create_table :test_posts, if_not_exists: true do |t|
+          t.string :title
+        end
+      end
+      expect(@conn.data_source_exists?(:test_posts)).to be true
+    end
+
+    it "is a no-op when the table already exists" do
+      schema_define do
+        create_table :test_posts, force: true do |t|
+          t.string :title
+        end
+      end
+
+      expect do
+        schema_define do
+          create_table :test_posts, if_not_exists: true do |t|
+            t.string :title
+          end
+        end
+      end.not_to raise_error
+    end
+
+    it "raises ArgumentError when force and if_not_exists are combined" do
+      expect do
+        schema_define do
+          create_table :test_posts, force: true, if_not_exists: true do |t|
+            t.string :title
+          end
+        end
+      end.to raise_error(ArgumentError, /cannot be used simultaneously/)
     end
   end
 
@@ -1414,12 +1487,16 @@ end
       @conn.instance_variable_set :@would_execute_sql, @would_execute_sql = +""
       class << @conn
         def execute(sql, name = nil); @would_execute_sql << sql << ";\n"; end
+        def execute_batch(statements, name = nil, **kwargs)
+          statements.each { |s| execute(s, name) }
+        end
       end
     end
 
     after(:each) do
       class << @conn
         remove_method :execute
+        remove_method :execute_batch
       end
       @conn.instance_eval { remove_instance_variable :@would_execute_sql }
     end
