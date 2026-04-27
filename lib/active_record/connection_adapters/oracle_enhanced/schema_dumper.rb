@@ -17,6 +17,7 @@ module ActiveRecord # :nodoc:
           def tables(stream)
             # do not include materialized views in schema dump - they should be created separately after schema creation
             sorted_tables = (@connection.tables - @connection.materialized_views).sort
+            @trigger_backed_tables = @connection.trigger_backed_table_names
             sorted_tables.each do |tbl|
               # add table prefix or suffix for schema_migrations
               next if ignored? tbl
@@ -122,7 +123,13 @@ module ActiveRecord # :nodoc:
                   end
                   tbl.print ", #{format_colspec(pkcolspec)}"
                 end
-                tbl.print ", identity: true" if pkcol.auto_incremented_by_db?
+                if pkcol.auto_incremented_by_db?
+                  tbl.print ", identity: true"
+                elsif (trigger_name = @trigger_backed_tables[table.upcase])
+                  tbl.print ", primary_key_trigger: true"
+                  default_name = @connection.default_trigger_name(table).upcase
+                  tbl.print ", trigger_name: #{trigger_name.downcase.inspect}" unless trigger_name == default_name
+                end
               when Array
                 tbl.print ", primary_key: #{pk.inspect}"
               else

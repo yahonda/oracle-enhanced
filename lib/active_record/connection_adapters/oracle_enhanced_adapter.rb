@@ -552,9 +552,10 @@ module ActiveRecord
         table_name = table_name.to_s
         if @prefetch_primary_key_cache[table_name].nil?
           owner, desc_table_name = resolve_data_source_name(table_name)
-          has_pk          = has_primary_key?(table_name, owner, desc_table_name)
-          has_identity_pk = supports_identity_columns? && identity_primary_key?(owner, desc_table_name)
-          @prefetch_primary_key_cache[table_name] = has_pk && !has_identity_pk
+          has_pk                = has_primary_key?(table_name, owner, desc_table_name)
+          has_identity_pk       = supports_identity_columns? && identity_primary_key?(owner, desc_table_name)
+          has_trigger_backed_pk = trigger_backed_primary_key?(owner, desc_table_name)
+          @prefetch_primary_key_cache[table_name] = has_pk && !has_identity_pk && !has_trigger_backed_pk
         end
         @prefetch_primary_key_cache[table_name]
       end
@@ -579,6 +580,50 @@ module ActiveRecord
             AND itc.table_name = :table_name
             AND c.constraint_type = 'P'
         SQL
+      end
+
+      # Detects only triggers whose body contains the
+      # `<seq>.NEXTVAL INTO :new.<pk>` pattern emitted by `create_pk_trigger`.
+      # Restricts the +all_triggers+ scan with an +EXISTS+ over +all_source+
+      # so unrelated `BEFORE INSERT` row triggers (audit, last_modified, etc.)
+      # do not flip +prefetch_primary_key?+ to false on tables that still
+      # rely on Rails-side sequence prefetch.
+      def trigger_backed_primary_key?(owner, desc_table_name) # :nodoc:
+        select_values_forcing_binds(<<~SQL.squish, "SCHEMA", [bind_string("owner", owner), bind_string("table_name", desc_table_name)]).any?
+          SELECT 1
+          FROM all_triggers t
+          WHERE t.owner = :owner
+            AND t.table_name = :table_name
+            AND t.trigger_type = 'BEFORE EACH ROW'
+            AND t.triggering_event = 'INSERT'
+            AND EXISTS (
+              SELECT 1 FROM all_source s
+               WHERE s.owner = t.owner
+                 AND s.name  = t.trigger_name
+                 AND s.type  = 'TRIGGER'
+                 AND UPPER(s.text) LIKE '%NEXTVAL INTO :NEW%'
+            )
+        SQL
+      end
+
+      def trigger_backed_table_names # :nodoc:
+        rows = select_all(<<~SQL.squish, "SCHEMA")
+          SELECT t.table_name, t.trigger_name
+          FROM all_triggers t
+          WHERE t.owner = SYS_CONTEXT('userenv', 'current_schema')
+            AND t.trigger_type = 'BEFORE EACH ROW'
+            AND t.triggering_event = 'INSERT'
+            AND EXISTS (
+              SELECT 1 FROM all_source s
+               WHERE s.owner = t.owner
+                 AND s.name  = t.trigger_name
+                 AND s.type  = 'TRIGGER'
+                 AND UPPER(s.text) LIKE '%NEXTVAL INTO :NEW%'
+            )
+        SQL
+        rows.each_with_object({}) do |row, hash|
+          hash[row["table_name"]] = row["trigger_name"]
+        end
       end
 
       def reset_pk_sequence!(table_name, primary_key = nil, sequence_name = nil) # :nodoc:
