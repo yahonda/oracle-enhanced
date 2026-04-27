@@ -211,6 +211,9 @@ module ActiveRecord
           if force && data_source_exists?(table_name)
             drop_table(table_name, force: force, if_exists: true)
           elsif options[:if_not_exists] && data_source_exists?(table_name)
+            # Oracle 21c and earlier do not support `CREATE TABLE IF NOT EXISTS` DDL;
+            # pre-check existence in Ruby so the emitted SQL stays identical across
+            # all supported Oracle releases.
             return
           end
 
