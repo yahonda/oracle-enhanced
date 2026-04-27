@@ -622,7 +622,18 @@ module ActiveRecord
           super + [:identity, :sequence_name, :sequence_start_value]
         end
 
+        def quoted_columns_for_index(column_names, options) # :nodoc:
+          quoted_columns = column_names.each_with_object({}) do |name, result|
+            result[name.to_sym] = quote_column_name_or_expression(name).dup
+          end
+          add_options_for_index_columns(quoted_columns, **options).values.join(", ")
+        end
+
         private
+          def index_column_names(column_names) # :nodoc:
+            column_names.is_a?(Array) ? column_names : Array(column_names)
+          end
+
           def validate_identity_options!(identity, id, primary_key)
             return unless identity
             unless supports_identity_columns?
