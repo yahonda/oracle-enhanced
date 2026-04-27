@@ -2,12 +2,17 @@
 
 # Surfaces method-signature drift between oracle_enhanced and Rails.
 #
-# For every instance method defined inside an `OracleEnhanced::*` module or the
-# `OracleEnhancedAdapter` class, this script finds the nearest non-OE Rails
-# adapter ancestor that also defines that method and compares the parameter
-# list (`Method#parameters`). Any drift in arity, parameter kind (req / opt /
-# rest / keyreq / key / keyrest / block) or parameter name is reported, and
-# the script exits non-zero so CI can catch it.
+# For every instance method defined inside an `OracleEnhanced::*` module or
+# class reachable from one of the `ROOTS` below, this script finds the nearest
+# non-OE Rails adapter ancestor that also defines that method and compares the
+# parameter list (`Method#parameters`). Any drift in arity, parameter kind
+# (req / opt / rest / keyreq / key / keyrest / block) or parameter name is
+# reported, and the script exits non-zero so CI can catch it.
+#
+# `ROOTS` includes the adapter class plus other OE-namespaced classes whose
+# ancestor chains do not run through `OracleEnhancedAdapter` (visitors,
+# schema-dump, and the per-object subclasses in `schema_definitions.rb` /
+# `column.rb`).
 #
 # This complements ci/check_method_visibility.rb: visibility checks public /
 # private alignment, this one catches cases where a Rails method grows or
@@ -32,13 +37,43 @@
 require "active_record"
 require "active_record/connection_adapters/oracle_enhanced_adapter"
 
-ADAPTER = ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter
+# Roots whose ancestor chains are walked. The adapter class itself covers
+# everything `OracleEnhancedAdapter.ancestors` reaches —
+# `OracleEnhanced::SchemaStatements`, `Quoting`, `DatabaseStatements`, etc.
+# The other entries pick up classes that override Rails contracts but are not
+# in the adapter's ancestor chain: visitors (`SchemaCreation`), schema-dump
+# (`SchemaDumper`), and the per-object subclasses defined in
+# `connection_adapters/oracle_enhanced/schema_definitions.rb` and `column.rb`.
+ROOTS = [
+  ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::SchemaCreation,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::SchemaDumper,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::Column,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::ReferenceDefinition,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::IndexDefinition,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::TableDefinition,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::AlterTable,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::Table,
+].freeze
 
 # Drifts listed here are intentionally accepted, with a one-line reason. Keep
 # this set small and give it a good justification — the whole point of the
 # check is to flag *unintentional* drift.
 IGNORED_DRIFTS = [
-  # { method: :some_method, oe_owner: "Some::Module", rails_owner: "Some::Rails" },
+  # OE Column adds an `identity:` kwarg for the Phase 1 identity-column
+  # support (#2579). The rest of the signature is anonymous forwarding
+  # (`*`, `**`) so other Rails-side params still flow through unchanged.
+  { method: :initialize, oe_owner: "ActiveRecord::ConnectionAdapters::OracleEnhanced::Column", rails_owner: "ActiveRecord::ConnectionAdapters::Column" },
+  # OE IndexDefinition predates Rails' kwarg-based signature; it uses an all-positional
+  # shape that the read path (`indexes(table_name)`) and write path (`add_index_options`)
+  # both rely on. Reconciling to the kwarg shape is a separate refactor.
+  { method: :initialize, oe_owner: "ActiveRecord::ConnectionAdapters::OracleEnhanced::IndexDefinition", rails_owner: "ActiveRecord::ConnectionAdapters::IndexDefinition" },
+  # OE TableDefinition does not declare `if_not_exists:` explicitly — it absorbs
+  # the kwarg through `**options` and lets the override of `create_table`
+  # pre-check existence in Ruby (Oracle 21c and earlier do not support
+  # `IF NOT EXISTS` DDL). The behavior is symmetric with Rails; the drift is
+  # only in the explicit kwarg list.
+  { method: :initialize, oe_owner: "ActiveRecord::ConnectionAdapters::OracleEnhanced::TableDefinition", rails_owner: "ActiveRecord::ConnectionAdapters::TableDefinition" },
 ].freeze
 
 OE_NAMESPACE = /(^|::)OracleEnhanced(?:Adapter)?(?:::|$)/
@@ -152,39 +187,47 @@ def ignored?(drift)
 end
 
 drifts = []
-ancestors = ADAPTER.ancestors
-oe_ancestors = ancestors.select { |owner| oe_owned?(owner) }
+seen = {}
 
-oe_ancestors.each do |oe_owner|
-  own_methods = oe_owner.public_instance_methods(false) +
-                oe_owner.private_instance_methods(false) +
-                oe_owner.protected_instance_methods(false)
+ROOTS.each do |root|
+  ancestors = root.ancestors
+  oe_ancestors = ancestors.select { |owner| oe_owned?(owner) }
 
-  own_methods.sort.each do |method_name|
-    oe_params = parameters_of(oe_owner, method_name)
-    next if oe_params.nil?
-    next if oe_params == FORWARD_ALL
+  oe_ancestors.each do |oe_owner|
+    own_methods = oe_owner.public_instance_methods(false) +
+                  oe_owner.private_instance_methods(false) +
+                  oe_owner.protected_instance_methods(false)
 
-    rails_pair = find_rails_counterpart(ancestors, method_name)
-    next unless rails_pair
+    own_methods.sort.each do |method_name|
+      key = [oe_owner.object_id, method_name]
+      next if seen[key]
+      seen[key] = true
 
-    rails_owner, rails_params = rails_pair
-    # When Rails itself uses anonymous forwarding the true contract is set by
-    # whatever calls it, not by the reflected signature, so we can't compare.
-    next if rails_params == FORWARD_ALL
+      oe_params = parameters_of(oe_owner, method_name)
+      next if oe_params.nil?
+      next if oe_params == FORWARD_ALL
 
-    categories = compare_parameters(oe_params, rails_params)
-    next if categories.empty?
+      rails_pair = find_rails_counterpart(ancestors, method_name)
+      next unless rails_pair
 
-    drift = {
-      method: method_name,
-      oe_owner: oe_owner.name,
-      oe_params: oe_params,
-      rails_owner: rails_owner.name,
-      rails_params: rails_params,
-      categories: categories,
-    }
-    drifts << drift unless ignored?(drift)
+      rails_owner, rails_params = rails_pair
+      # When Rails itself uses anonymous forwarding the true contract is set by
+      # whatever calls it, not by the reflected signature, so we can't compare.
+      next if rails_params == FORWARD_ALL
+
+      categories = compare_parameters(oe_params, rails_params)
+      next if categories.empty?
+
+      drift = {
+        method: method_name,
+        oe_owner: oe_owner.name,
+        oe_params: oe_params,
+        rails_owner: rails_owner.name,
+        rails_params: rails_params,
+        categories: categories,
+      }
+      drifts << drift unless ignored?(drift)
+    end
   end
 end
 
