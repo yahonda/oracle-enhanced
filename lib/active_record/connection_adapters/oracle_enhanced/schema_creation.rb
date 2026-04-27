@@ -83,6 +83,22 @@ module ActiveRecord
             end
           end
 
+          def visit_CreateIndexDefinition(o)
+            index = o.index
+
+            sql = ["CREATE"]
+            sql << "UNIQUE" if index.unique
+            sql << "INDEX"
+            sql << quote_column_name(index.name)
+            sql << "ON"
+            sql << quote_table_name(index.table)
+            sql << "(#{quoted_columns(index)})"
+            sql << "TABLESPACE #{index.tablespace}" if index.tablespace.present?
+            sql << index.statement_parameters if index.statement_parameters.present?
+
+            sql.join(" ")
+          end
+
           def action_sql(action, dependency)
             if action == "UPDATE"
               raise ArgumentError, <<~MSG
