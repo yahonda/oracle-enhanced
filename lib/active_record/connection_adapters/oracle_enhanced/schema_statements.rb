@@ -261,7 +261,7 @@ module ActiveRecord
 
           execute schema_creation.accept td
 
-          create_sequence_and_trigger(table_name, options) if create_sequence && !identity
+          create_pk_sequence(table_name, options) if create_sequence && !identity
 
           if supports_comments? && !supports_comments_in_create?
             if table_comment = td.comment.presence
@@ -449,7 +449,7 @@ module ActiveRecord
           add_column_sql = schema_creation.accept at
           add_column_sql << tablespace_for((type_to_sql(type).downcase.to_sym), nil, table_name, column_name)
           execute add_column_sql
-          create_sequence_and_trigger(table_name, options) if type && type.to_sym == :primary_key
+          create_pk_sequence(table_name, options) if type && type.to_sym == :primary_key
           change_column_comment(table_name, column_name, options[:comment]) if options.key?(:comment)
         ensure
           clear_table_columns_cache(table_name)
@@ -791,7 +791,7 @@ module ActiveRecord
             column
           end
 
-          def create_sequence_and_trigger(table_name, options)
+          def create_pk_sequence(table_name, options)
             # TODO: Needs rename since no triggers created
             # This method will be removed since sequence will not be created separately
             seq_name = options[:sequence_name] || default_sequence_name(table_name, nil)
