@@ -523,18 +523,12 @@ module ActiveRecord
 
         def change_table_comment(table_name, comment_or_changes)
           clear_cache!
-          comment = extract_new_comment_value(comment_or_changes)
-          if comment.nil?
-            execute "COMMENT ON TABLE #{quote_table_name(table_name)} IS ''"
-          else
-            execute "COMMENT ON TABLE #{quote_table_name(table_name)} IS #{quote(comment)}"
-          end
+          execute change_table_comment_sql(table_name, comment_or_changes)
         end
 
         def change_column_comment(table_name, column_name, comment_or_changes)
           clear_cache!
-          comment = extract_new_comment_value(comment_or_changes)
-          execute "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS '#{comment}'"
+          execute change_column_comment_sql(table_name, column_name, comment_or_changes)
         end
 
         def table_comment(table_name) # :nodoc:
@@ -676,6 +670,20 @@ module ActiveRecord
         end
 
         private
+          def change_table_comment_sql(table_name, comment_or_changes)
+            comment = extract_new_comment_value(comment_or_changes)
+            if comment.nil?
+              "COMMENT ON TABLE #{quote_table_name(table_name)} IS ''"
+            else
+              "COMMENT ON TABLE #{quote_table_name(table_name)} IS #{quote(comment)}"
+            end
+          end
+
+          def change_column_comment_sql(table_name, column_name, comment_or_changes)
+            comment = extract_new_comment_value(comment_or_changes)
+            "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS '#{comment}'"
+          end
+
           def insert_versions_sql(versions)
             sm_table = quote_table_name(ActiveRecord::Tasks::DatabaseTasks.migration_connection_pool.schema_migration.table_name)
 
