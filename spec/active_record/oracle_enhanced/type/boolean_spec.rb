@@ -3,7 +3,7 @@
 describe "OracleEnhancedAdapter boolean type detection based on string column types and names" do
   before(:all) do
     ActiveRecord::Base.establish_connection(CONNECTION_PARAMS)
-    @conn = ActiveRecord::Base.connection
+    @conn = ActiveRecord::Base.lease_connection
     @conn.execute <<~SQL
       CREATE TABLE test3_employees (
         id            NUMBER PRIMARY KEY,
@@ -37,12 +37,23 @@ describe "OracleEnhancedAdapter boolean type detection based on string column ty
   end
 
   before(:each) do
+    # Re-establish the connection so the adapter does not carry over
+    # column-adapter bindings that were resolved while
+    # `emulate_booleans_from_strings` happened to be true in some
+    # other example's lifetime. clear_type_map!/clear_cache! alone are
+    # not sufficient; the adapter caches additional state on the
+    # connection itself.
+    ActiveRecord::Base.establish_connection(CONNECTION_PARAMS)
+    ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.clear_type_map!
+    ActiveRecord::Base.clear_cache!
     class ::Test3Employee < ActiveRecord::Base
     end
   end
 
   after(:each) do
     Object.send(:remove_const, "Test3Employee")
+    ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.emulate_booleans_from_strings = false
+    ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.clear_type_map!
     ActiveRecord::Base.clear_cache!
   end
 
@@ -78,7 +89,7 @@ describe "OracleEnhancedAdapter boolean type detection based on string column ty
 
   it "should translate boolean type to NUMBER(1) if emulate_booleans_from_strings is false" do
     ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.emulate_booleans_from_strings = false
-    sql_type = ActiveRecord::Base.connection.type_to_sql(:boolean)
+    sql_type = ActiveRecord::Base.lease_connection.type_to_sql(:boolean)
     expect(sql_type).to eq("NUMBER(1)")
   end
 

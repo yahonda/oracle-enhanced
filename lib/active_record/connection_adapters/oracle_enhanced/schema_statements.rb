@@ -200,79 +200,32 @@ module ActiveRecord
         #   end
 
         def create_table(table_name, id: :primary_key, primary_key: nil, force: nil, **options)
+          # Mirror upstream guard: `super` is called with `force: nil` below, so the same check there is bypassed.
+          if force && options.key?(:if_not_exists)
+            raise ArgumentError, "Options `:force` and `:if_not_exists` cannot be used simultaneously."
+          end
+
           identity = options[:identity]
-          create_sequence = id != false
-          td = create_table_definition(
-            table_name, **options.extract!(:temporary, :options, :as, :comment, :tablespace, :organization)
-          )
-
-          if identity
-            unless supports_identity_columns?
-              raise ArgumentError,
-                "`identity: true` requires Oracle Database 12.1 or higher (current: #{database_version.join('.')}). Remove `identity: true` or upgrade the database."
-            end
-            unless id == :primary_key
-              raise ArgumentError,
-                "`identity: true` requires `id: :primary_key` (the default); got id: #{id.inspect}."
-            end
-            if primary_key.is_a?(Array)
-              raise ArgumentError,
-                "`identity: true` cannot be combined with a composite primary key."
-            end
-          end
-
-          if id && !td.as
-            pk = primary_key || Base.get_primary_key(table_name.to_s.singularize)
-
-            if pk.is_a?(Array)
-              td.primary_keys pk
-            else
-              td.primary_key pk, id, **options
-            end
-          end
-
-          # store that primary key was defined in create_table block
-          unless create_sequence
-            class << td
-              attr_accessor :create_sequence
-              # Only request a sequence when the primary key column is a
-              # numeric type that a +NUMBER+ sequence can populate. For
-              # example, +t.primary_key :code, :string+ inside +id: false+
-              # creates a VARCHAR2 PK; building a numeric sequence for it
-              # is meaningless and pollutes the schema with an unused
-              # +<table>_seq+.
-              def primary_key(name, type = :primary_key, **options)
-                if [:primary_key, :integer, :bigint, :decimal].include?(type)
-                  self.create_sequence = true
-                end
-                super(name, type, **options)
-              end
-            end
-          end
-
-          yield td if block_given?
-          create_sequence = create_sequence || td.create_sequence
+          validate_identity_options!(identity, id, primary_key)
 
           if force && data_source_exists?(table_name)
             drop_table(table_name, force: force, if_exists: true)
-          else
-            schema_cache.clear_data_source_cache!(table_name.to_s)
+          elsif options[:if_not_exists] && data_source_exists?(table_name)
+            # Oracle 21c and earlier do not support `CREATE TABLE IF NOT EXISTS` DDL;
+            # pre-check existence in Ruby so the emitted SQL stays identical across
+            # all supported Oracle releases.
+            return
           end
 
-          execute schema_creation.accept td
-
-          create_sequence_and_trigger(table_name, options) if create_sequence && !identity
-
-          if supports_comments? && !supports_comments_in_create?
-            if table_comment = td.comment.presence
-              change_table_comment(table_name, table_comment)
-            end
-            td.columns.each do |column|
-              change_column_comment(table_name, column.name, column.comment) if column.comment.present?
-            end
+          captured_td = nil
+          super(table_name, id: id, primary_key: primary_key, force: nil, **options) do |td|
+            captured_td = td
+            yield td if block_given?
           end
-          td.indexes.each { |c, o| add_index table_name, c, **o }
 
+          add_inline_unique_constraints(table_name, captured_td)
+
+          create_pk_sequence(table_name, options) if should_create_sequence?(captured_td, id, identity)
           rebuild_primary_key_index_to_default_tablespace(table_name, options)
         end
 
@@ -282,8 +235,11 @@ module ActiveRecord
           end
           schema_cache.clear_data_source_cache!(table_name.to_s)
           schema_cache.clear_data_source_cache!(new_name.to_s)
+          identity_pk = identity_pk?(table_name)
           execute "RENAME #{quote_table_name(table_name)} TO #{quote_table_name(new_name)}"
-          execute "RENAME #{default_sequence_name(table_name, nil)} TO #{default_sequence_name(new_name, nil)}" rescue nil
+          unless identity_pk
+            execute "RENAME #{default_sequence_name(table_name, nil)} TO #{default_sequence_name(new_name, nil)}" rescue nil
+          end
           @prefetch_primary_key_cache.delete(table_name.to_s)
 
           rename_table_indexes(table_name, new_name, **options)
@@ -295,9 +251,13 @@ module ActiveRecord
           custom_sequence_name = table_names.size == 1 ? options[:sequence_name] : nil
           table_names.each do |table_name|
             schema_cache.clear_data_source_cache!(table_name.to_s)
+            identity_pk = identity_pk?(table_name)
             execute "DROP TABLE #{quote_table_name(table_name)}#{' CASCADE CONSTRAINTS' if options[:force] == :cascade}"
-            seq_name = custom_sequence_name || default_sequence_name(table_name, nil)
-            execute "DROP SEQUENCE #{quote_table_name(seq_name)}" rescue nil
+            if custom_sequence_name
+              execute "DROP SEQUENCE #{quote_table_name(custom_sequence_name)}" rescue nil
+            elsif !identity_pk
+              execute "DROP SEQUENCE #{quote_table_name(default_sequence_name(table_name, nil))}" rescue nil
+            end
           rescue ActiveRecord::StatementInvalid => e
             raise e unless options[:if_exists]
           ensure
@@ -307,38 +267,49 @@ module ActiveRecord
         end
 
         def add_index(table_name, column_name, **options) # :nodoc:
-          result = add_index_options(table_name, column_name, **options)
-          return if result.nil?
-          index_name, index_type, quoted_column_names, tablespace, index_options = result
-          execute "CREATE #{index_type} INDEX #{quote_column_name(index_name)} ON #{quote_table_name(table_name)} (#{quoted_column_names})#{tablespace} #{index_options}"
-          if index_type == "UNIQUE"
-            unless /\(.*\)/.match?(quoted_column_names)
-              execute "ALTER TABLE #{quote_table_name(table_name)} ADD CONSTRAINT #{quote_column_name(index_name)} #{index_type} (#{quoted_column_names}) USING INDEX #{quote_column_name(index_name)}"
-            end
+          create_index = build_create_index_definition(table_name, column_name, **options)
+          return unless create_index
+
+          execute schema_creation.accept(create_index)
+
+          index = create_index.index
+          if needs_unique_constraint?(index.unique, index.columns)
+            execute add_unique_constraint_sql(index.table, index.columns, index.name)
           end
         end
 
-        def add_index_options(table_name, column_name, name: nil, if_not_exists: false, internal: false, **options) # :nodoc:
-          column_names = Array(column_name)
-          index_name   = index_name(table_name, column: column_names)
+        def build_create_index_definition(table_name, column_name, **options) # :nodoc:
+          index, algorithm, if_not_exists = add_index_options(table_name, column_name, **options)
 
+          if table_exists?(table_name) && index_name_exists?(table_name, index.name)
+            return if if_not_exists
+            raise ArgumentError, "Index name '#{index.name}' on table '#{table_name}' already exists"
+          end
+
+          CreateIndexDefinition.new(index, algorithm, if_not_exists)
+        end
+
+        def add_index_options(table_name, column_name, name: nil, if_not_exists: false, internal: false, **options) # :nodoc:
           options.assert_valid_keys(:unique, :order, :where, :length, :tablespace, :options, :using, :comment)
 
-          index_type = options[:unique] ? "UNIQUE" : ""
-          index_name = name.to_s if name
-          tablespace = tablespace_for(:index, options[:tablespace])
-          # TODO: This option is used for NOLOGGING, needs better argument name
-          index_options = options[:options]
+          column_names = index_column_names(column_name)
+          index_name = name&.to_s || index_name(table_name, column: column_names)
 
           validate_index_length!(table_name, index_name, internal)
 
-          if table_exists?(table_name) && index_name_exists?(table_name, index_name)
-            return nil if if_not_exists
-            raise ArgumentError, "Index name '#{index_name}' on table '#{table_name}' already exists"
-          end
+          index = OracleEnhanced::IndexDefinition.new(
+            table_name,
+            index_name,
+            options[:unique] || false,
+            column_names,
+            {},
+            nil,
+            nil,
+            options[:options],
+            options[:tablespace] || default_tablespace_for(:index)
+          )
 
-          quoted_column_names = column_names.map { |e| quote_column_name_or_expression(e) }.join(", ")
-          [index_name, index_type, quoted_column_names, tablespace, index_options]
+          [index, nil, if_not_exists]
         end
 
         # Remove the given index from the table.
@@ -449,7 +420,7 @@ module ActiveRecord
           add_column_sql = schema_creation.accept at
           add_column_sql << tablespace_for((type_to_sql(type).downcase.to_sym), nil, table_name, column_name)
           execute add_column_sql
-          create_sequence_and_trigger(table_name, options) if type && type.to_sym == :primary_key
+          create_pk_sequence(table_name, options) if type.to_sym == :primary_key
           change_column_comment(table_name, column_name, options[:comment]) if options.key?(:comment)
         ensure
           clear_table_columns_cache(table_name)
@@ -523,18 +494,12 @@ module ActiveRecord
 
         def change_table_comment(table_name, comment_or_changes)
           clear_cache!
-          comment = extract_new_comment_value(comment_or_changes)
-          if comment.nil?
-            execute "COMMENT ON TABLE #{quote_table_name(table_name)} IS ''"
-          else
-            execute "COMMENT ON TABLE #{quote_table_name(table_name)} IS #{quote(comment)}"
-          end
+          execute change_table_comment_sql(table_name, comment_or_changes)
         end
 
         def change_column_comment(table_name, column_name, comment_or_changes)
           clear_cache!
-          comment = extract_new_comment_value(comment_or_changes)
-          execute "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS '#{comment}'"
+          execute change_column_comment_sql(table_name, column_name, comment_or_changes)
         end
 
         def table_comment(table_name) # :nodoc:
@@ -667,11 +632,102 @@ module ActiveRecord
           OracleEnhanced::SchemaCreation.new self
         end
 
+        def valid_table_definition_options # :nodoc:
+          super + [:tablespace, :organization]
+        end
+
         def valid_primary_key_options # :nodoc:
-          super + [:identity]
+          super + [:identity, :sequence_name, :sequence_start_value]
+        end
+
+        def quoted_columns_for_index(column_names, options) # :nodoc:
+          quoted_columns = column_names.each_with_object({}) do |name, result|
+            result[name.to_sym] = quote_column_name_or_expression(name).dup
+          end
+          add_options_for_index_columns(quoted_columns, **options).values.join(", ")
         end
 
         private
+          # True when +table_name+ exists and its primary key column is an Oracle
+          # identity column. Returns false when the table is not present (e.g.
+          # +drop_table if_exists:+ for a missing table) or when the database does
+          # not support identity columns.
+          def identity_pk?(table_name)
+            return false unless supports_identity_columns?
+            owner, desc_table_name = resolve_data_source_name(table_name)
+            identity_primary_key?(owner, desc_table_name)
+          rescue OracleEnhanced::ConnectionException
+            false
+          end
+
+          def index_column_names(column_names) # :nodoc:
+            column_names.is_a?(Array) ? column_names : Array(column_names)
+          end
+
+          def needs_unique_constraint?(unique, columns)
+            return false unless unique
+            Array(columns).none? { |column| column.to_s.include?("(") }
+          end
+
+          def add_unique_constraint_sql(table_name, columns, index_name)
+            quoted_cols = Array(columns).map { |column| quote_column_name_or_expression(column) }.join(", ")
+            "ALTER TABLE #{quote_table_name(table_name)} ADD CONSTRAINT #{quote_column_name(index_name)} UNIQUE (#{quoted_cols}) USING INDEX #{quote_column_name(index_name)}"
+          end
+
+          def add_inline_unique_constraints(table_name, td)
+            td.indexes.each do |column_name, index_options|
+              next unless needs_unique_constraint?(index_options[:unique], column_name)
+              inline_index_name = index_options[:name]&.to_s || index_name(table_name, column: index_column_names(column_name))
+              execute add_unique_constraint_sql(table_name, column_name, inline_index_name)
+            end
+          end
+
+          def validate_identity_options!(identity, id, primary_key)
+            return unless identity
+            unless supports_identity_columns?
+              raise ArgumentError,
+                "`identity: true` requires Oracle Database 12.1 or higher (current: #{database_version.join('.')}). Remove `identity: true` or upgrade the database."
+            end
+            unless id == :primary_key
+              raise ArgumentError,
+                "`identity: true` requires `id: :primary_key` (the default); got id: #{id.inspect}."
+            end
+            if primary_key.is_a?(Array)
+              raise ArgumentError,
+                "`identity: true` cannot be combined with a composite primary key."
+            end
+          end
+
+          def should_create_sequence?(td, id, identity)
+            return false if identity
+            numeric_pk_types = [:primary_key, :integer, :bigint, :decimal]
+            if id
+              numeric_pk_types.include?(id)
+            else
+              td.columns.any? do |column|
+                column.options[:primary_key] && numeric_pk_types.include?(column.type)
+              end
+            end
+          end
+
+          def change_table_comment_sql(table_name, comment_or_changes)
+            comment = extract_new_comment_value(comment_or_changes)
+            if comment.nil?
+              "COMMENT ON TABLE #{quote_table_name(table_name)} IS ''"
+            else
+              "COMMENT ON TABLE #{quote_table_name(table_name)} IS #{quote(comment)}"
+            end
+          end
+
+          def change_column_comment_sql(table_name, column_name, comment_or_changes)
+            comment = extract_new_comment_value(comment_or_changes)
+            if comment.nil?
+              "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS ''"
+            else
+              "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS #{quote(comment)}"
+            end
+          end
+
           def insert_versions_sql(versions)
             sm_table = quote_table_name(ActiveRecord::Tasks::DatabaseTasks.migration_connection_pool.schema_migration.table_name)
 
@@ -681,12 +737,12 @@ module ActiveRecord
               } << "SELECT * FROM DUAL\n"
             else
               if versions.is_a?(Array)
-                # called from ActiveRecord::Base.connection#dump_schema_versions
+                # called from ActiveRecord::Base.lease_connection#dump_schema_versions
                 versions.map { |version|
                   "INSERT INTO #{sm_table} (version) VALUES (#{quote(version)})"
                 }.join("\n\n/\n\n")
               else
-                # called from ActiveRecord::Base.connection#assume_migrated_upto_version
+                # called from ActiveRecord::Base.lease_connection#assume_migrated_upto_version
                 "INSERT INTO #{sm_table} (version) VALUES (#{quote(versions)})"
               end
             end
@@ -779,9 +835,10 @@ module ActiveRecord
             column
           end
 
-          def create_sequence_and_trigger(table_name, options)
-            # TODO: Needs rename since no triggers created
-            # This method will be removed since sequence will not be created separately
+          # TODO: extend to also create a BEFORE INSERT trigger when issue
+          # https://github.com/rsim/oracle-enhanced/issues/2597 introduces
+          # `primary_key_trigger: true`.
+          def create_pk_sequence(table_name, options)
             seq_name = options[:sequence_name] || default_sequence_name(table_name, nil)
             seq_start_value = options[:sequence_start_value] || default_sequence_start_value
             execute "CREATE SEQUENCE #{quote_table_name(seq_name)} START WITH #{seq_start_value}"

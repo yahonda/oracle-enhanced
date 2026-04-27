@@ -6,7 +6,7 @@ describe "OracleEnhancedAdapter schema dump" do
 
   before(:all) do
     ActiveRecord::Base.establish_connection(CONNECTION_PARAMS)
-    @conn = ActiveRecord::Base.connection
+    @conn = ActiveRecord::Base.lease_connection
     @oracle11g_or_higher = !! @conn.select_value(
       "select * from product_component_version where product like 'Oracle%' and to_number(substr(version,1,2)) >= 11")
   end
@@ -109,8 +109,17 @@ describe "OracleEnhancedAdapter schema dump" do
   end
 
   describe "foreign key constraints" do
-    before(:all) do
+    # Recreate the canonical tables before each example. One example
+    # (`should include primary_key when reference column name is not 'id'`)
+    # mutates the schema by replacing test_posts/test_comments with
+    # tables that lack `test_post_id`; under :random order any FK
+    # example that runs after it then fails with
+    # `ORA-00904: "TEST_POST_ID": invalid identifier`. Resetting the
+    # tables per-example keeps every example independent of order.
+    before(:each) do
       schema_define do
+        drop_table :test_comments, if_exists: true
+        drop_table :test_posts, if_exists: true
         create_table :test_posts, force: true do |t|
           t.string :title
         end
@@ -463,7 +472,7 @@ describe "OracleEnhancedAdapter schema dump" do
 
     it "should dump table comments" do
       output = dump_table_schema "test_table_comments"
-      expect(output).to match(/create_table "test_table_comments", comment: "this is a \\"table comment\\"!", force: :cascade do \|t\|$/)
+      expect(output).to match(/create_table "test_table_comments",(?: identity: (?:true|false),)? comment: "this is a \\"table comment\\"!", force: :cascade do \|t\|$/)
     end
   end
 
