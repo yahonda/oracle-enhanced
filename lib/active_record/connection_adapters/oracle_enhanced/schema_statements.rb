@@ -659,7 +659,11 @@ module ActiveRecord
 
           def change_column_comment_sql(table_name, column_name, comment_or_changes)
             comment = extract_new_comment_value(comment_or_changes)
-            "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS '#{comment}'"
+            if comment.nil?
+              "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS ''"
+            else
+              "COMMENT ON COLUMN #{quote_table_name(table_name)}.#{quote_column_name(column_name)} IS #{quote(comment)}"
+            end
           end
 
           def insert_versions_sql(versions)
