@@ -61,8 +61,18 @@ module ActiveRecord
             cursor = nil
             returning_id_col = returning_id_index = nil
             with_retry do
-              if binds.nil? || binds.empty?
+              if !intent.prepare || binds.nil? || binds.empty?
                 cursor = _connection.prepare(sql)
+
+                unless binds.nil? || binds.empty?
+                  cursor.bind_params(type_casted_binds)
+
+                  if sql.include?(":returning_id")
+                    # it currently expects that returning_id comes last part of binds
+                    returning_id_index = binds.size
+                    cursor.bind_returning_param(returning_id_index, Integer)
+                  end
+                end
               else
                 unless @statements.key?(sql)
                   @statements[sql] = _connection.prepare(sql)
