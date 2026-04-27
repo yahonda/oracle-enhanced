@@ -672,7 +672,7 @@ module ActiveRecord
         end
 
         def valid_primary_key_options # :nodoc:
-          super + [:identity]
+          super + [:identity, :sequence_name, :sequence_start_value]
         end
 
         private
