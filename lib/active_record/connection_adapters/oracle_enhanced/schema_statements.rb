@@ -766,9 +766,10 @@ module ActiveRecord
             column
           end
 
+          # TODO: extend to also create a BEFORE INSERT trigger when issue
+          # https://github.com/rsim/oracle-enhanced/issues/2597 introduces
+          # `primary_key_trigger: true`.
           def create_pk_sequence(table_name, options)
-            # TODO: Needs rename since no triggers created
-            # This method will be removed since sequence will not be created separately
             seq_name = options[:sequence_name] || default_sequence_name(table_name, nil)
             seq_start_value = options[:sequence_start_value] || default_sequence_start_value
             execute "CREATE SEQUENCE #{quote_table_name(seq_name)} START WITH #{seq_start_value}"
