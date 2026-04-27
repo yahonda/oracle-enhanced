@@ -200,11 +200,18 @@ module ActiveRecord
         #   end
 
         def create_table(table_name, id: :primary_key, primary_key: nil, force: nil, **options)
+          # Mirror upstream guard: `super` is called with `force: nil` below, so the same check there is bypassed.
+          if force && options.key?(:if_not_exists)
+            raise ArgumentError, "Options `:force` and `:if_not_exists` cannot be used simultaneously."
+          end
+
           identity = options[:identity]
           validate_identity_options!(identity, id, primary_key)
 
           if force && data_source_exists?(table_name)
             drop_table(table_name, force: force, if_exists: true)
+          elsif options[:if_not_exists] && data_source_exists?(table_name)
+            return
           end
 
           captured_td = nil

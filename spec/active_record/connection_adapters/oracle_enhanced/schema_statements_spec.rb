@@ -616,6 +616,51 @@ end
     end
   end
 
+  describe "create_table with if_not_exists" do
+    before(:each) do
+      @conn = ActiveRecord::Base.lease_connection
+    end
+
+    after(:each) do
+      schema_define { drop_table :test_posts, if_exists: true }
+    end
+
+    it "creates the table when it does not yet exist" do
+      schema_define do
+        create_table :test_posts, if_not_exists: true do |t|
+          t.string :title
+        end
+      end
+      expect(@conn.data_source_exists?(:test_posts)).to be true
+    end
+
+    it "is a no-op when the table already exists" do
+      schema_define do
+        create_table :test_posts, force: true do |t|
+          t.string :title
+        end
+      end
+
+      expect do
+        schema_define do
+          create_table :test_posts, if_not_exists: true do |t|
+            t.string :title
+          end
+        end
+      end.not_to raise_error
+    end
+
+    it "raises ArgumentError when force and if_not_exists are combined" do
+      expect do
+        schema_define do
+          create_table :test_posts, force: true, if_not_exists: true do |t|
+            t.string :title
+          end
+        end
+      end.to raise_error(ArgumentError, /cannot be used simultaneously/)
+    end
+  end
+
   describe "add timestamps" do
     before(:each) do
       @conn = ActiveRecord::Base.lease_connection
