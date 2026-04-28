@@ -207,6 +207,7 @@ module ActiveRecord
 
           identity = options[:identity]
           validate_identity_options!(identity, id, primary_key)
+          validate_primary_key_trigger_options!(options[:primary_key_trigger], identity, id, primary_key)
 
           if force && data_source_exists?(table_name)
             drop_table(table_name, force: force, if_exists: true)
@@ -226,6 +227,7 @@ module ActiveRecord
           add_inline_unique_constraints(table_name, captured_td)
 
           create_pk_sequence(table_name, options) if should_create_sequence?(captured_td, id, identity)
+          create_pk_trigger(table_name, primary_key, options) if options[:primary_key_trigger]
           rebuild_primary_key_index_to_default_tablespace(table_name, options)
         end
 
@@ -407,13 +409,20 @@ module ActiveRecord
             raise ArgumentError,
               "`identity: true` is not supported on `add_column`. Recreate the table with `create_table ..., identity: true` instead."
           end
+          if options[:primary_key_trigger] && type.to_s.to_sym != :primary_key
+            raise ArgumentError,
+              "`primary_key_trigger: true` on `add_column` requires the column type to be `:primary_key`; got type: #{type.inspect}."
+          end
           type = aliased_types(type.to_s, type)
           at = create_alter_table table_name
           at.add_column(column_name, type, **options)
           add_column_sql = schema_creation.accept at
           add_column_sql << tablespace_for((type_to_sql(type).downcase.to_sym), nil, table_name, column_name)
           execute add_column_sql
-          create_pk_sequence(table_name, options) if type.to_sym == :primary_key
+          if type.to_sym == :primary_key
+            create_pk_sequence(table_name, options)
+            create_pk_trigger(table_name, column_name, options) if options[:primary_key_trigger]
+          end
           change_column_comment(table_name, column_name, options[:comment]) if options.key?(:comment)
         ensure
           clear_table_columns_cache(table_name)
@@ -630,7 +639,20 @@ module ActiveRecord
         end
 
         def valid_primary_key_options # :nodoc:
-          super + [:identity, :sequence_name, :sequence_start_value]
+          super + [:identity, :sequence_name, :sequence_start_value, :primary_key_trigger, :trigger_name]
+        end
+
+        def default_trigger_name(table_name) # :nodoc:
+          table_name.to_s.gsub(/(\A|\.)([[:word:]$#-]+)\z/) do
+            prefix = Regexp.last_match(1)
+            name = Regexp.last_match(2)
+            max_bytes = max_identifier_length - 4
+            if name.bytesize > max_bytes
+              name = name.byteslice(0, max_bytes)
+              name = name.byteslice(0, name.bytesize - 1) until name.bytesize.zero? || name.valid_encoding?
+            end
+            "#{prefix}#{name}_pkt"
+          end
         end
 
         def quoted_columns_for_index(column_names, options) # :nodoc:
@@ -676,6 +698,22 @@ module ActiveRecord
             if primary_key.is_a?(Array)
               raise ArgumentError,
                 "`identity: true` cannot be combined with a composite primary key."
+            end
+          end
+
+          def validate_primary_key_trigger_options!(primary_key_trigger, identity, id, primary_key)
+            return unless primary_key_trigger
+            if identity
+              raise ArgumentError,
+                "`primary_key_trigger: true` cannot be combined with `identity: true`."
+            end
+            unless id == :primary_key
+              raise ArgumentError,
+                "`primary_key_trigger: true` requires `id: :primary_key` (the default); got id: #{id.inspect}."
+            end
+            if primary_key.is_a?(Array)
+              raise ArgumentError,
+                "`primary_key_trigger: true` cannot be combined with a composite primary key."
             end
           end
 
@@ -816,13 +854,27 @@ module ActiveRecord
             column
           end
 
-          # TODO: extend to also create a BEFORE INSERT trigger when issue
-          # https://github.com/rsim/oracle-enhanced/issues/2597 introduces
-          # `primary_key_trigger: true`.
           def create_pk_sequence(table_name, options)
             seq_name = options[:sequence_name] || default_sequence_name(table_name, nil)
             seq_start_value = options[:sequence_start_value] || default_sequence_start_value
             execute "CREATE SEQUENCE #{quote_table_name(seq_name)} START WITH #{seq_start_value}"
+          end
+
+          def create_pk_trigger(table_name, pk_column, options)
+            seq_name = options[:sequence_name] || default_sequence_name(table_name, nil)
+            trigger_name = options[:trigger_name] || default_trigger_name(table_name)
+            pk = pk_column || ActiveRecord::Base.get_primary_key(table_name.to_s.singularize)
+            execute <<~SQL
+              CREATE OR REPLACE TRIGGER #{quote_table_name(trigger_name)}
+                BEFORE INSERT ON #{quote_table_name(table_name)} FOR EACH ROW
+              BEGIN
+                IF inserting THEN
+                  IF :new.#{quote_column_name(pk)} IS NULL THEN
+                    SELECT #{quote_table_name(seq_name)}.NEXTVAL INTO :new.#{quote_column_name(pk)} FROM dual;
+                  END IF;
+                END IF;
+              END;
+            SQL
           end
 
           def rebuild_primary_key_index_to_default_tablespace(table_name, options)
