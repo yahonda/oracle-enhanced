@@ -51,13 +51,13 @@ is the recommended way to work on the adapter.
    "Dev Containers: Reopen in Container".
 4. VS Code builds and starts the environment automatically. This
    includes Ruby 4.0, Oracle Database Free (latest), Oracle Instant
-   Client 23.26, and all gems from `bundle install`.
+   Client (latest 23.x), and all gems from `bundle install`.
 
 ### What's included
 
 - **Ruby**: 4.0
 - **Oracle Database**: Free (latest)
-- **Oracle Instant Client**: 23.26
+- **Oracle Instant Client**: latest 23.x
 - **Database configuration**:
   - Port `1521` is forwarded from the container
   - Service name: `FREEPDB1`
