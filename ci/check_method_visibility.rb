@@ -2,14 +2,19 @@
 
 # Surfaces visibility drift between oracle_enhanced and Rails.
 #
-# For every instance method defined inside an `OracleEnhanced::*` module or the
-# `OracleEnhancedAdapter` class, this script finds the nearest non-OE Rails
-# adapter ancestor that also defines that method and compares the Ruby
-# visibility (public / private / protected). Any mismatch is reported, and the
-# script exits non-zero so CI can catch it.
+# For every instance method defined inside an `OracleEnhanced::*` module or
+# class reachable from one of the `ROOTS` below, this script finds the nearest
+# non-OE Rails adapter ancestor that also defines that method and compares the
+# Ruby visibility (public / private / protected). Any mismatch is reported,
+# and the script exits non-zero so CI can catch it.
 #
-# Because it walks `OracleEnhancedAdapter.ancestors`, it intentionally does not
-# care which Rails module the counterpart lives in. A method we define in
+# `ROOTS` includes the adapter class plus other OE-namespaced classes whose
+# ancestor chains do not run through `OracleEnhancedAdapter` (visitors,
+# schema-dump, and the per-object subclasses in `schema_definitions.rb` /
+# `column.rb`).
+#
+# Because each root's ancestor chain is walked independently, the script does
+# not care which Rails module the counterpart lives in. A method we define in
 # `OracleEnhanced::SchemaStatements` that Rails defines directly on
 # `AbstractAdapter` (or vice versa) is still detected as a drift as long as
 # both sides name the method the same way.
@@ -31,7 +36,24 @@
 require "active_record"
 require "active_record/connection_adapters/oracle_enhanced_adapter"
 
-ADAPTER = ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter
+# Roots whose ancestor chains are walked. The adapter class itself covers
+# everything `OracleEnhancedAdapter.ancestors` reaches —
+# `OracleEnhanced::SchemaStatements`, `Quoting`, `DatabaseStatements`, etc.
+# The other entries pick up classes that override Rails contracts but are not
+# in the adapter's ancestor chain: visitors (`SchemaCreation`), schema-dump
+# (`SchemaDumper`), and the per-object subclasses defined in
+# `connection_adapters/oracle_enhanced/schema_definitions.rb` and `column.rb`.
+ROOTS = [
+  ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::SchemaCreation,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::SchemaDumper,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::Column,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::ReferenceDefinition,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::IndexDefinition,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::TableDefinition,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::AlterTable,
+  ActiveRecord::ConnectionAdapters::OracleEnhanced::Table,
+].freeze
 
 # Drifts listed here are intentionally accepted, with a one-line reason. Keep
 # this set small and give it a good justification — the whole point of the
@@ -86,30 +108,38 @@ def ignored?(drift)
 end
 
 drifts = []
-ancestors = ADAPTER.ancestors
-oe_ancestors = ancestors.select { |owner| oe_owned?(owner) }
+seen = {}
 
-oe_ancestors.each do |oe_owner|
-  own_methods = oe_owner.public_instance_methods(false) +
-                oe_owner.private_instance_methods(false) +
-                oe_owner.protected_instance_methods(false)
+ROOTS.each do |root|
+  ancestors = root.ancestors
+  oe_ancestors = ancestors.select { |owner| oe_owned?(owner) }
 
-  own_methods.sort.each do |method_name|
-    rails_pair = find_rails_counterpart(ancestors, method_name)
-    next unless rails_pair
+  oe_ancestors.each do |oe_owner|
+    own_methods = oe_owner.public_instance_methods(false) +
+                  oe_owner.private_instance_methods(false) +
+                  oe_owner.protected_instance_methods(false)
 
-    rails_owner, rails_vis = rails_pair
-    oe_vis = visibility_of(oe_owner, method_name)
-    next if oe_vis == rails_vis
+    own_methods.sort.each do |method_name|
+      key = [oe_owner.object_id, method_name]
+      next if seen[key]
+      seen[key] = true
 
-    drift = {
-      method: method_name,
-      oe_owner: oe_owner.name,
-      oe_vis: oe_vis,
-      rails_owner: rails_owner.name,
-      rails_vis: rails_vis,
-    }
-    drifts << drift unless ignored?(drift)
+      rails_pair = find_rails_counterpart(ancestors, method_name)
+      next unless rails_pair
+
+      rails_owner, rails_vis = rails_pair
+      oe_vis = visibility_of(oe_owner, method_name)
+      next if oe_vis == rails_vis
+
+      drift = {
+        method: method_name,
+        oe_owner: oe_owner.name,
+        oe_vis: oe_vis,
+        rails_owner: rails_owner.name,
+        rails_vis: rails_vis,
+      }
+      drifts << drift unless ignored?(drift)
+    end
   end
 end
 
