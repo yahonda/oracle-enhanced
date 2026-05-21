@@ -8,11 +8,6 @@
     "memory": "8gb",
     "storage": "32gb"
   },
-  "features": {
-    "ghcr.io/rails/devcontainer/features/ruby:2": {
-      "version": "4.0.4"
-    }
-  },
   "customizations": {
     "vscode": {
       "extensions": [

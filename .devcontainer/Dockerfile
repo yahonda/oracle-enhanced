@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/base:trixie
+FROM mcr.microsoft.com/devcontainers/ruby:4.0-trixie
 
 # Install libaio1t64 and provide a libaio.so.1 symlink for Oracle Instant Client
 # Install rlwrap for readline support in sqlplus
