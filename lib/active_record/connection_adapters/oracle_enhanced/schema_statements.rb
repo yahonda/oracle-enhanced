@@ -231,6 +231,15 @@ module ActiveRecord
             raise ArgumentError, "Options `:force` and `:if_not_exists` cannot be used simultaneously."
           end
 
+          implicit_unique_constraint = options.delete(:_implicit_unique_constraint)
+
+          if !options.key?(:identity) &&
+             id == :primary_key && !primary_key.is_a?(Array) &&
+             !options[:sequence_name] && !options[:sequence_start_value] &&
+             supports_identity_columns?
+            options[:identity] = true
+          end
+
           identity = options[:identity]
           validate_identity_options!(identity, id, primary_key)
           validate_primary_key_trigger_options!(options[:primary_key_trigger], identity, id, primary_key)
@@ -250,7 +259,7 @@ module ActiveRecord
             yield td if block_given?
           end
 
-          add_inline_unique_constraints(table_name, captured_td)
+          add_inline_unique_constraints(table_name, captured_td, implicit_unique_constraint)
 
           create_pk_sequence(table_name, options) if should_create_sequence?(captured_td, id, identity)
           create_pk_trigger(table_name, primary_key, options) if options[:primary_key_trigger]
@@ -303,13 +312,14 @@ module ActiveRecord
         end
 
         def add_index(table_name, column_name, **options) # :nodoc:
+          implicit_unique_constraint = options.delete(:_implicit_unique_constraint)
           create_index = build_create_index_definition(table_name, column_name, **options)
           return unless create_index
 
           execute schema_creation.accept(create_index)
 
           index = create_index.index
-          if needs_unique_constraint?(index.unique, index.columns) && OracleEnhancedAdapter.add_index_unique_creates_constraint
+          if needs_unique_constraint?(index.unique, index.columns) && implicit_unique_constraint_active?(implicit_unique_constraint)
             warn_implicit_unique_constraint_deprecation
             execute add_unique_constraint_sql(index.table, index.columns, index.name)
           end
@@ -1235,6 +1245,10 @@ module ActiveRecord
             column_names.is_a?(Array) ? column_names : Array(column_names)
           end
 
+          def implicit_unique_constraint_active?(version_flag)
+            OracleEnhancedAdapter.add_index_unique_creates_constraint || version_flag == true
+          end
+
           def needs_unique_constraint?(unique, columns)
             return false unless unique
             Array(columns).none? { |column| column.to_s.include?("(") }
@@ -1245,10 +1259,10 @@ module ActiveRecord
             "ALTER TABLE #{quote_table_name(table_name)} ADD CONSTRAINT #{quote_column_name(index_name)} UNIQUE (#{quoted_cols}) USING INDEX #{quote_column_name(index_name)}"
           end
 
-          def add_inline_unique_constraints(table_name, td)
+          def add_inline_unique_constraints(table_name, td, implicit_unique_constraint = false)
             td.indexes.each do |column_name, index_options|
               next unless needs_unique_constraint?(index_options[:unique], column_name)
-              next unless OracleEnhancedAdapter.add_index_unique_creates_constraint
+              next unless implicit_unique_constraint_active?(implicit_unique_constraint)
               warn_implicit_unique_constraint_deprecation
               inline_index_name = index_options[:name]&.to_s || index_name(table_name, column: index_column_names(column_name))
               execute add_unique_constraint_sql(table_name, column_name, inline_index_name)
