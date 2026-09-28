@@ -12,7 +12,7 @@ on:
 jobs:
   check:
     name: "Compare Ruby method signatures against Rails"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       NLS_LANG: American_America.AL32UTF8
     steps:
