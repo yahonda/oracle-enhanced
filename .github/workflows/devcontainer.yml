@@ -17,6 +17,12 @@ jobs:
       - name: Ensure .bundle mount source exists
         run: mkdir -p .bundle
 
+      # docker-compose.yml reads GIT_COMMON_DIR from .devcontainer/.env,
+      # which initializeCommand writes, but devcontainers/ci runs
+      # `docker compose config` before initializeCommand.
+      - name: Write .devcontainer/.env
+        run: printf 'GIT_COMMON_DIR=%s\n' "$(git rev-parse --path-format=absolute --git-common-dir)" > .devcontainer/.env
+
       - name: Boot dev container and run tests
         uses: devcontainers/ci@v0.3
         with:
