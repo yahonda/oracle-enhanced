@@ -1,0 +1,19 @@
+name: asan-repro
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+        ruby: [asan, asan-release]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - run: ruby -v
